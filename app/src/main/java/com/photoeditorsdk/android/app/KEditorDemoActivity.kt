@@ -1,6 +1,5 @@
 package com.photoeditorsdk.android.app
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
@@ -10,29 +9,29 @@ import android.provider.MediaStore
 import android.util.Log
 import android.widget.Button
 import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.*
 import ly.img.android.pesdk.PhotoEditorSettingsList
 import ly.img.android.pesdk.assets.filter.basic.FilterPackBasic
 import ly.img.android.pesdk.assets.font.basic.FontPackBasic
 import ly.img.android.pesdk.assets.frame.basic.FramePackBasic
 import ly.img.android.pesdk.assets.overlay.basic.OverlayPackBasic
-import ly.img.android.pesdk.assets.sticker.emoticons.StickerPackEmoticons
-import ly.img.android.pesdk.assets.sticker.shapes.StickerPackShapes
+import ly.img.android.pesdk.backend.decoder.ImageSource
 import ly.img.android.pesdk.backend.model.EditorSDKResult
+import ly.img.android.pesdk.backend.model.config.ImageStickerAsset
 import ly.img.android.pesdk.backend.model.constant.OutputMode
 import ly.img.android.pesdk.backend.model.state.LoadSettings
 import ly.img.android.pesdk.backend.model.state.PhotoEditorSaveSettings
 import ly.img.android.pesdk.ui.activity.PhotoEditorBuilder
-import ly.img.android.pesdk.ui.model.state.UiConfigFilter
-import ly.img.android.pesdk.ui.model.state.UiConfigFrame
-import ly.img.android.pesdk.ui.model.state.UiConfigOverlay
-import ly.img.android.pesdk.ui.model.state.UiConfigSticker
-import ly.img.android.pesdk.ui.model.state.UiConfigText
-import ly.img.android.pesdk.ui.panels.item.PersonalStickerAddItem
+import ly.img.android.pesdk.ui.model.state.*
+import ly.img.android.pesdk.ui.panels.item.CustomStickerCategoryItem
+import ly.img.android.serializer._3.IMGLYFileReader
 import ly.img.android.serializer._3.IMGLYFileWriter
 import java.io.File
 import java.io.IOException
 
-class KEditorDemoActivity : Activity() {
+class KEditorDemoActivity : AppCompatActivity() {
 
     companion object {
         const val PESDK_RESULT = 1
@@ -57,18 +56,53 @@ class KEditorDemoActivity : Activity() {
         .configure<UiConfigOverlay> {
             it.setOverlayList(OverlayPackBasic.getOverlayPack())
         }
-        .configure<UiConfigSticker> {
-            it.setStickerLists(
-                PersonalStickerAddItem(),
-                StickerPackEmoticons.getStickerCategory(),
-                StickerPackShapes.getStickerCategory()
-            )
-        }
         .configure<PhotoEditorSaveSettings> {
             // Set custom editor image export settings
             it.setOutputToGallery(Environment.DIRECTORY_DCIM)
-            it.outputMode = OutputMode.EXPORT_IF_NECESSARY
+            it.outputMode = OutputMode.EXPORT_ONLY_SETTINGS_LIST
         }
+
+    private suspend fun addStickers(settingsList: PhotoEditorSettingsList) {
+        val stickers = mutableListOf<ImageStickerAsset>()
+
+        withContext(Dispatchers.IO) {
+            val db = DrawableAssetDatabase.getInstance(this@KEditorDemoActivity)
+            val assets = db.DrawableAssetDao().getAll()
+            val jobs = mutableListOf<Job>()
+            for (asset in assets) {
+                jobs.add(launch {
+                    StickerLoader.loadHiResSticker(
+                        this@KEditorDemoActivity,
+                        asset.drawableAssetId,
+                        StickerLoader.CacheOpts.RETRIEVE_FROM_CACHE
+                    )?.let {
+                        stickers.add(
+                            ImageStickerAsset(
+                                asset.drawableAssetId,
+                                ImageSource.create(
+                                    it
+                                )
+                            )
+                        )
+                    }
+                })
+            }
+            jobs.joinAll()
+        }
+
+        settingsList.config.addAsset(*stickers.toTypedArray())
+
+        settingsList.configure<UiConfigSticker> {
+            it.setStickerLists(
+                CustomStickerCategoryItem(
+                    "custom_sticker_category",
+                    ExampleStickersFragment::class.java,
+                    "Custom Stickers",
+                    ImageSource.create(ly.img.android.pesdk.assets.sticker.emoticons.R.drawable.imgly_sticker_emoticons_hitman)
+                )
+            )
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -95,19 +129,47 @@ class KEditorDemoActivity : Activity() {
     }
 
     fun openEditor(inputImage: Uri?) {
-        val settingsList = createPesdkSettingsList()
+        lifecycleScope.launch {
+            val settingsList = createPesdkSettingsList()
 
-        settingsList.configure<LoadSettings> {
-            it.source = inputImage
+            addStickers(settingsList)
+
+            settingsList.configure<LoadSettings> {
+                it.source = inputImage
+            }
+
+            withContext(Dispatchers.IO) {
+                if (file.exists()) {
+                    try {
+                        // Deserialize JSON file and read it into SettingsList
+                        IMGLYFileReader(settingsList).readJson(file)
+                    } catch (e: IOException) {
+                        withContext(Dispatchers.Main) {
+                            showMessage("Error reading serialisation")
+                        }
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        showMessage("Serialisation file not found")
+                    }
+                }
+            }
+
+            PhotoEditorBuilder(this@KEditorDemoActivity, CustomPhotoEditorActivity::class.java)
+                .setSettingsList(settingsList)
+                .startActivityForResult(this@KEditorDemoActivity, PESDK_RESULT)
+
+            settingsList.release()
         }
-
-        PhotoEditorBuilder(this)
-          .setSettingsList(settingsList)
-          .startActivityForResult(this, PESDK_RESULT)
-
-        settingsList.release()
     }
 
+    private fun showMessage(msg: String) {
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+    }
+
+    private val file by lazy {
+        File(filesDir, "serialisationReadyToReadWithPESDKFileReader.json")
+    }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, intent: Intent?) {
         super.onActivityResult(requestCode, resultCode, intent)
@@ -131,15 +193,12 @@ class KEditorDemoActivity : Activity() {
 
             // OPTIONAL: read the latest state to save it as a serialisation
             val lastState = data.settingsList
-            try {
-                IMGLYFileWriter(lastState).writeJson(File(
-                    Environment.getExternalStorageDirectory(),
-                    "serialisationReadyToReadWithPESDKFileReader.json"
-                ))
-            } catch (e: IOException) {
-                e.printStackTrace()
-            }
-
+//            try {
+//                IMGLYFileWriter(lastState).writeJson(file)
+//            } catch (e: IOException) {
+//                e.printStackTrace()
+//            }
+//
             lastState.release()
 
         } else if (resultCode == RESULT_CANCELED && requestCode == PESDK_RESULT) {
