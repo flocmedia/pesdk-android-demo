@@ -1,91 +1,63 @@
 package com.photoeditorsdk.android.app
 
+import android.R
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.os.Bundle
+import android.util.Base64
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ImageView
-import androidx.lifecycle.lifecycleScope
-import androidx.recyclerview.widget.GridLayoutManager
-import androidx.recyclerview.widget.RecyclerView
-import com.bumptech.glide.Glide
-import com.bumptech.glide.request.RequestOptions
-import com.photoeditorsdk.android.app.StickerLoader.TARGET_SIZE
-import kotlinx.coroutines.launch
+import android.widget.Button
+import androidx.core.content.ContextCompat
 import ly.img.android.pesdk.backend.decoder.ImageSource
-import ly.img.android.pesdk.backend.model.config.ImageStickerAsset
-import ly.img.android.pesdk.backend.model.state.layer.ImageStickerLayerSettings
-import ly.img.android.pesdk.backend.model.state.layer.SpriteLayerSettings
 import ly.img.android.pesdk.ui.sticker.custom.CustomStickersFragment
+import java.io.ByteArrayOutputStream
+
 
 class ExampleStickersFragment : CustomStickersFragment() {
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        return RecyclerView(requireContext()).apply {
-            layoutManager = GridLayoutManager(context, 5)
+        return Button(requireContext()).apply {
+            text = "Add"
 
-            lifecycleScope.launch {
-                val items = DrawableAssetDatabase.getInstance(context).DrawableAssetDao().getAll()
-                adapter = StickerAdapter(items) {
-                    lifecycleScope.launch {
-                        // Call onStickerSelected() on stickerSelectedListener and pass the ImageSource for the sticker to be added
+            setOnClickListener {
+                ContextCompat.getDrawable(
+                    context,
+                    ly.img.android.pesdk.assets.sticker.emoticons.R.drawable.imgly_sticker_emoticons_hitman
+                )?.let {
+                    drawableToBitmap(it)?.let {
                         stickerSelectedListener.onStickerSelected(
-                            ImageSource.create(
-                                StickerLoader.loadHiResSticker(
-                                    context,
-                                    it.drawableAssetId
-                                )
-                            )
+                            ImageSource.createFromBase64String(encodeToBase64(it))
                         )
                     }
                 }
             }
         }
     }
-}
 
-class StickerAdapter(
-    private val items: List<DrawableAsset>,
-    private val onClick: (item: DrawableAsset) -> Unit
-) : RecyclerView.Adapter<StickerAdapter.StickerViewHolder>() {
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): StickerViewHolder =
-        StickerViewHolder(
-            LayoutInflater.from(parent.context).inflate(R.layout.item_sticker_view, parent, false)
-        ) {
-            if (it != RecyclerView.NO_POSITION) {
-                onClick(items[it])
-            }
+    private fun drawableToBitmap(drawable: Drawable): Bitmap? {
+        if (drawable is BitmapDrawable) {
+            return drawable.bitmap
         }
-
-    override fun onBindViewHolder(holder: StickerViewHolder, position: Int) {
-        holder.bind(items[position])
+        val bitmap =
+            Bitmap.createBitmap(drawable.intrinsicWidth, drawable.intrinsicHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        drawable.setBounds(0, 0, canvas.width, canvas.height)
+        drawable.draw(canvas)
+        return bitmap
     }
 
-    override fun getItemCount(): Int = items.size
-
-    inner class StickerViewHolder(itemView: View, onClick: (position: Int) -> Unit): RecyclerView.ViewHolder(itemView) {
-        private val stickerImageView = itemView.findViewById<ImageView>(R.id.stickerImageView)
-
-        init {
-            stickerImageView.setOnClickListener { onClick(bindingAdapterPosition) }
-        }
-
-        fun bind(asset: DrawableAsset) {
-            val context = itemView.context
-            Glide.with(itemView).load(
-                context.resources.getIdentifier(
-                    asset.drawableAssetId,
-                    "drawable",
-                    context.packageName
-                )
-            )
-                .apply(
-                    RequestOptions().override(
-                        TARGET_SIZE,
-                        TARGET_SIZE
-                    )
-                )
-                .into(stickerImageView)
-        }
+    private fun encodeToBase64(
+        image: Bitmap,
+        compressFormat: Bitmap.CompressFormat = Bitmap.CompressFormat.PNG,
+        quality: Int = 100
+    ): String {
+        val byteArrayOS = ByteArrayOutputStream()
+        image.compress(compressFormat, quality, byteArrayOS)
+        return Base64.encodeToString(byteArrayOS.toByteArray(), Base64.DEFAULT)
     }
 }
