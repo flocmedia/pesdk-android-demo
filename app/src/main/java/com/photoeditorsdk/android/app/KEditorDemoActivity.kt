@@ -10,6 +10,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.widget.Button
 import android.widget.Toast
+import androidx.work.WorkManager
 import ly.img.android.pesdk.PhotoEditorSettingsList
 import ly.img.android.pesdk.assets.filter.basic.FilterPackBasic
 import ly.img.android.pesdk.assets.font.basic.FontPackBasic
@@ -21,6 +22,7 @@ import ly.img.android.pesdk.backend.model.EditorSDKResult
 import ly.img.android.pesdk.backend.model.constant.OutputMode
 import ly.img.android.pesdk.backend.model.state.LoadSettings
 import ly.img.android.pesdk.backend.model.state.PhotoEditorSaveSettings
+import ly.img.android.pesdk.backend.operator.headless.DocumentRenderWorker
 import ly.img.android.pesdk.ui.activity.PhotoEditorBuilder
 import ly.img.android.pesdk.ui.model.state.UiConfigFilter
 import ly.img.android.pesdk.ui.model.state.UiConfigFrame
@@ -28,9 +30,6 @@ import ly.img.android.pesdk.ui.model.state.UiConfigOverlay
 import ly.img.android.pesdk.ui.model.state.UiConfigSticker
 import ly.img.android.pesdk.ui.model.state.UiConfigText
 import ly.img.android.pesdk.ui.panels.item.PersonalStickerAddItem
-import ly.img.android.serializer._3.IMGLYFileWriter
-import java.io.File
-import java.io.IOException
 
 class KEditorDemoActivity : Activity() {
 
@@ -67,7 +66,7 @@ class KEditorDemoActivity : Activity() {
         .configure<PhotoEditorSaveSettings> {
             // Set custom editor image export settings
             it.setOutputToGallery(Environment.DIRECTORY_DCIM)
-            it.outputMode = OutputMode.EXPORT_IF_NECESSARY
+            it.outputMode = OutputMode.EXPORT_ONLY_SETTINGS_LIST
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -124,23 +123,35 @@ class KEditorDemoActivity : Activity() {
             // Editor has saved an Image.
             val data = EditorSDKResult(intent)
 
-            Log.i("PESDK", "Source image is located here ${data.sourceUri}")
-            Log.i("PESDK", "Result image is located here ${data.resultUri}")
-
-            // TODO: Do something with the result image
-
-            // OPTIONAL: read the latest state to save it as a serialisation
-            val lastState = data.settingsList
-            try {
-                IMGLYFileWriter(lastState).writeJson(File(
-                    Environment.getExternalStorageDirectory(),
-                    "serialisationReadyToReadWithPESDKFileReader.json"
-                ))
-            } catch (e: IOException) {
-                e.printStackTrace()
+            when (data.resultStatus) {
+                EditorSDKResult.Status.CANCELED -> Log.i("PESDK", "Editor cancelled")
+                EditorSDKResult.Status.DONE_WITHOUT_EXPORT -> {
+                    // Export the photo in background using WorkManager
+                    data.settingsList.use { document ->
+                        WorkManager.getInstance(this).enqueue(DocumentRenderWorker.createWorker(document))
+                    }
+                }
+                else -> {
+                }
             }
 
-            lastState.release()
+            Log.i("PESDK", "Source image is located here ${data.sourceUri}")
+//            Log.i("PESDK", "Result image is located here ${data.resultUri}")
+
+//            // TODO: Do something with the result image
+//
+//            // OPTIONAL: read the latest state to save it as a serialisation
+//            val lastState = data.settingsList
+//            try {
+//                IMGLYFileWriter(lastState).writeJson(File(
+//                    Environment.getExternalStorageDirectory(),
+//                    "serialisationReadyToReadWithPESDKFileReader.json"
+//                ))
+//            } catch (e: IOException) {
+//                e.printStackTrace()
+//            }
+//
+//            lastState.release()
 
         } else if (resultCode == RESULT_CANCELED && requestCode == PESDK_RESULT) {
             // Editor was canceled

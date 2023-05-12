@@ -31,6 +31,8 @@ imglyConfig {
         // Allow Background Encoding [Optional]
         include 'backend:headless'
 
+        include 'backend:background-removal'
+
         // Add asset packs if you need
         include 'assets:font-basic'
         include 'assets:frame-basic'
@@ -75,6 +77,5 @@ android {
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
     implementation 'androidx.appcompat:appcompat:1.3.1'
 }
