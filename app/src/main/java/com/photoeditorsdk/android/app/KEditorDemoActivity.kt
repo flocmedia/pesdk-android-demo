@@ -101,7 +101,7 @@ class KEditorDemoActivity : Activity() {
             it.source = inputImage
         }
 
-        PhotoEditorBuilder(this)
+        PhotoEditorBuilder(Intent(this, MyEditorActivity::class.java))
           .setSettingsList(settingsList)
           .startActivityForResult(this, PESDK_RESULT)
 
