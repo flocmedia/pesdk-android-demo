@@ -1,15 +1,26 @@
 package com.photoeditorsdk.android.app
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ContentResolver
 import android.content.Intent
+import android.content.res.Resources
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.os.Environment
+import android.os.FileObserver
 import android.provider.MediaStore
 import android.util.Log
 import android.widget.Button
 import android.widget.Toast
+import androidx.annotation.RawRes
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ly.img.android.pesdk.PhotoEditorSettingsList
 import ly.img.android.pesdk.assets.filter.basic.FilterPackBasic
 import ly.img.android.pesdk.assets.font.basic.FontPackBasic
@@ -18,9 +29,11 @@ import ly.img.android.pesdk.assets.overlay.basic.OverlayPackBasic
 import ly.img.android.pesdk.assets.sticker.emoticons.StickerPackEmoticons
 import ly.img.android.pesdk.assets.sticker.shapes.StickerPackShapes
 import ly.img.android.pesdk.backend.model.EditorSDKResult
+import ly.img.android.pesdk.backend.model.constant.ImageExportFormat
 import ly.img.android.pesdk.backend.model.constant.OutputMode
 import ly.img.android.pesdk.backend.model.state.LoadSettings
 import ly.img.android.pesdk.backend.model.state.PhotoEditorSaveSettings
+import ly.img.android.pesdk.backend.operator.headless.DocumentRenderWorker
 import ly.img.android.pesdk.ui.activity.PhotoEditorBuilder
 import ly.img.android.pesdk.ui.model.state.UiConfigFilter
 import ly.img.android.pesdk.ui.model.state.UiConfigFrame
@@ -28,13 +41,12 @@ import ly.img.android.pesdk.ui.model.state.UiConfigOverlay
 import ly.img.android.pesdk.ui.model.state.UiConfigSticker
 import ly.img.android.pesdk.ui.model.state.UiConfigText
 import ly.img.android.pesdk.ui.panels.item.PersonalStickerAddItem
-import ly.img.android.serializer._3.IMGLYFileWriter
 import java.io.File
-import java.io.IOException
 
-class KEditorDemoActivity : Activity() {
+class KEditorDemoActivity : AppCompatActivity() {
 
     companion object {
+        private const val TAG = "KEditorDemoActivity"
         const val PESDK_RESULT = 1
         const val GALLERY_RESULT = 2
     }
@@ -66,9 +78,17 @@ class KEditorDemoActivity : Activity() {
         }
         .configure<PhotoEditorSaveSettings> {
             // Set custom editor image export settings
-            it.setOutputToGallery(Environment.DIRECTORY_DCIM)
-            it.outputMode = OutputMode.EXPORT_IF_NECESSARY
+            it.setOutputToUri(Uri.fromFile(getOutputFile()))
+            it.outputMode = OutputMode.EXPORT_ONLY_SETTINGS_LIST
+            it.setExportFormat(ImageExportFormat.PNG)
         }
+
+    private fun getOutputFile() = File(filesDir, "imgly_photo.jpg")
+
+    private fun Resources.getRawUri(@RawRes rawRes: Int) = "%s://%s/%s/%s".format(
+        ContentResolver.SCHEME_ANDROID_RESOURCE, this.getResourcePackageName(rawRes),
+        this.getResourceTypeName(rawRes), this.getResourceEntryName(rawRes)
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,8 +97,44 @@ class KEditorDemoActivity : Activity() {
         val openGallery = findViewById<Button>(R.id.openGallery)
 
         openGallery.setOnClickListener {
-            openSystemGalleryToSelectAnImage()
+            openEditor(Uri.parse(resources.getRawUri(R.raw.big_image)))
+//            openSystemGalleryToSelectAnImage()
         }
+    }
+
+    private suspend fun waitForClosingFile(file: File) = withContext(Dispatchers.IO) {
+        var isFileModified = false
+
+        val fileObserver = if (Build.VERSION.SDK_INT >= 29) {
+            object : FileObserver(file) {
+                override fun onEvent(event: Int, path: String?) {
+                    Log.d(TAG, "onEvent: ${Integer.toHexString(event)}, path: $path")
+
+                    isFileModified = true
+                }
+            }
+        }
+        else {
+            object : FileObserver(file.absolutePath) {
+                override fun onEvent(event: Int, path: String?) {
+                    Log.d(TAG, "onEvent: ${Integer.toHexString(event)}, path: $path")
+
+                    isFileModified = true
+                }
+            }
+        }
+
+        fileObserver.startWatching()
+
+        while (true) {
+            delay(1000)
+
+            if (!isFileModified) break
+
+            isFileModified = false
+        }
+
+        fileObserver.stopWatching()
     }
 
     fun openSystemGalleryToSelectAnImage() {
@@ -122,25 +178,37 @@ class KEditorDemoActivity : Activity() {
             }
         } else if (resultCode == RESULT_OK && requestCode == PESDK_RESULT) {
             // Editor has saved an Image.
-            val data = EditorSDKResult(intent)
+            val result = EditorSDKResult(intent)
 
-            Log.i("PESDK", "Source image is located here ${data.sourceUri}")
-            Log.i("PESDK", "Result image is located here ${data.resultUri}")
+            when (result.resultStatus) {
+                EditorSDKResult.Status.DONE_WITHOUT_EXPORT -> {
+                    // Export the photo in background using WorkManager
+                    result.settingsList.use { document ->
+                        val workRequest = DocumentRenderWorker.createWorker(document)
+                        WorkManager.getInstance(this).enqueue(workRequest)
+                        WorkManager.getInstance(this).getWorkInfoByIdLiveData(workRequest.id)
+                            .observe(this) { job ->
+                                Log.d(
+                                    TAG,
+                                    "State: ${job.state} Progress: ${
+                                        job.progress.getFloat(
+                                            DocumentRenderWorker.FLOAT_PROGRESS_KEY,
+                                            1f
+                                        )
+                                    }"
+                                )
 
-            // TODO: Do something with the result image
-
-            // OPTIONAL: read the latest state to save it as a serialisation
-            val lastState = data.settingsList
-            try {
-                IMGLYFileWriter(lastState).writeJson(File(
-                    Environment.getExternalStorageDirectory(),
-                    "serialisationReadyToReadWithPESDKFileReader.json"
-                ))
-            } catch (e: IOException) {
-                e.printStackTrace()
+                                if (job.state == WorkInfo.State.SUCCEEDED) {
+                                    lifecycleScope.launch {
+                                        waitForClosingFile(getOutputFile())
+                                    }
+                                }
+                            }
+                    }
+                }
+                else -> {
+                }
             }
-
-            lastState.release()
 
         } else if (resultCode == RESULT_CANCELED && requestCode == PESDK_RESULT) {
             // Editor was canceled
